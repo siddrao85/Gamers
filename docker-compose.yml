@@ -1,0 +1,84 @@
+# Home server stack for a Ryzen 7 7735HS / Radeon 680M mini PC (24GB RAM)
+#   - Ollama      : local LLMs, GPU-accelerated through Vulkan on the 680M
+#   - Open WebUI  : ChatGPT-style web interface for Ollama
+#   - Jellyfin    : media server with VAAPI hardware transcoding on the 680M
+#
+# Usage:
+#   cp .env.example .env    # then edit values
+#   docker compose up -d
+#
+# Open WebUI -> http://<server-ip>:3000
+# Jellyfin   -> http://<server-ip>:8096
+
+name: homeserver
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri            # Radeon 680M (Vulkan)
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-993}"
+    environment:
+      # The 680M is not officially supported by ROCm; Vulkan is the reliable GPU path.
+      # Set to 0 to run on the CPU only if Vulkan causes problems.
+      - OLLAMA_VULKAN=${OLLAMA_VULKAN:-1}
+      # RAM is shared between all services, so keep only one model loaded at a time
+      # and unload it after a period of inactivity.
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-10m}
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0    # halves context memory with negligible quality loss
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      # Only reachable from the server itself; Open WebUI talks to it over the
+      # internal Docker network. Change to "11434:11434" to expose it on your LAN.
+      - "127.0.0.1:11434:11434"
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?Set WEBUI_SECRET_KEY in .env}
+      - ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP:-true}   # set false after creating your admin account
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - "3000:8080"
+
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    devices:
+      - /dev/dri:/dev/dri            # VAAPI hardware transcoding
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-993}"
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - JELLYFIN_PublishedServerUrl=${JELLYFIN_URL:-}
+    volumes:
+      - jellyfin-config:/config
+      - jellyfin-cache:/cache
+      - ${MEDIA_PATH:-./media}:/media:ro
+    ports:
+      - "8096:8096"                  # web UI
+      - "7359:7359/udp"              # client auto-discovery on the LAN
+    mem_limit: 4g                    # leave RAM for LLMs
+
+volumes:
+  ollama:
+  open-webui:
+  jellyfin-config:
+  jellyfin-cache:
